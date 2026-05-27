@@ -1,0 +1,10 @@
+flask
+flask-cors
+python-dotenv
+razorpay
+flask-limiter
+gunicorn
+requests
+redis
+firebase-admin
+
