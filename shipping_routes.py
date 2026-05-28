@@ -167,6 +167,51 @@ def track_order():
             } for item in track_details
         ]
 
+        # Check and auto-update Firestore status
+        status_updated = False
+        new_status = None
+        
+        live_status = current_status.upper()
+        if 'DELIVERED' in live_status:
+            new_status = 'Delivered'
+        elif 'OUT FOR DELIVERY' in live_status:
+            new_status = 'Out for Delivery'
+        elif 'TRANSIT' in live_status or 'SHIPPED' in live_status:
+            new_status = 'Shipped'
+
+        if new_status and db:
+            try:
+                orders_ref = db.collection('orders')
+                # Search by awbNumber
+                query = orders_ref.where('awbNumber', '==', str(awb_number)).limit(1).stream()
+                order_doc = next(query, None)
+                
+                if not order_doc:
+                    # Try trackingId
+                    query = orders_ref.where('trackingId', '==', str(awb_number)).limit(1).stream()
+                    order_doc = next(query, None)
+                    
+                if order_doc:
+                    order_data = order_doc.to_dict()
+                    old_status = order_data.get('status')
+                    if old_status != new_status:
+                        order_doc.reference.update({
+                            'status': new_status,
+                            'lastSync': firestore.SERVER_TIMESTAMP
+                        })
+                        status_updated = True
+                        
+                        # Send customer notification
+                        send_customer_notification(
+                            order_doc.id,
+                            order_data.get('customerEmail'),
+                            order_data.get('address', {}).get('phone'),
+                            new_status,
+                            awb_number
+                        )
+            except Exception as db_err:
+                app.logger.error(f"Auto-update order status error: {str(db_err)}")
+
         return jsonify({
             "status": current_status,
             "location": current_location,
@@ -174,7 +219,9 @@ def track_order():
             "awb": track_header.get('strShipmentNo', awb_number),
             "origin": track_header.get('strOrigin', ''),
             "destination": track_header.get('strDestination', ''),
-            "history": history
+            "history": history,
+            "statusUpdated": status_updated,
+            "newStatus": new_status if status_updated else None
         }), 200
 
     except Exception as e:
