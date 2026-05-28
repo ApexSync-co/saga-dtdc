@@ -78,6 +78,8 @@ def book_consignment_internal(order_id, order_data):
                     'status': 'Shipped',
                     'updatedAt': firestore.SERVER_TIMESTAMP
                 })
+            else:
+                raise Exception("Firebase Admin SDK is not initialized on the backend. Please configure the FIREBASE_SERVICE_ACCOUNT_PATH environment variable on Vercel.")
             return awb
         else:
             error_reason = consignment_data.get('message') or consignment_data.get('reason') or consignment_data.get('error_message') or 'Unknown Shipsy Error'
