@@ -144,3 +144,5 @@ lerna-debug.log*
 # Firebase Service Account Credentials
 firebase-service-account.json
 
+
+.vercel

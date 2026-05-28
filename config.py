@@ -56,10 +56,10 @@ if allowed_origins_env:
     # Split by comma and strip any whitespace from each origin
     allowed_origins = [origin.strip() for origin in allowed_origins_env.split(',')]
 else:
-    # Default to allowing local development if no origins specified
-    allowed_origins = ["http://localhost:5173", "http://localhost:5174", "http://localhost:5175", "http://localhost:3000", "http://localhost:3001"]
+    # Default to wildcard to avoid CORS issues when env var is not set
+    allowed_origins = "*"
 
-CORS(app, origins=allowed_origins, supports_credentials=True)
+CORS(app, origins=allowed_origins, supports_credentials=False)
 print(f"CORS Allowed Origins: {allowed_origins}")
 
 # Rate Limiter setup
