@@ -75,7 +75,7 @@ def book_consignment_internal(order_id, order_data):
             if db:
                 db.collection('orders').document(order_id).update({
                     'awbNumber': awb,
-                    'status': 'Shipped',
+                    'status': 'Ready to Ship',
                     'updatedAt': firestore.SERVER_TIMESTAMP
                 })
             else:
@@ -320,9 +320,9 @@ def sync_order_statuses():
         return jsonify({"error": "Firebase not initialized"}), 500
 
     try:
-        # 1. Fetch orders that are Shipped or Out for Delivery
+        # 1. Fetch orders that are Ready to Ship, Shipped, or Out for Delivery
         orders_ref = db.collection('orders')
-        query = orders_ref.where('status', 'in', ['Shipped', 'Out for Delivery']).stream()
+        query = orders_ref.where('status', 'in', ['Ready to Ship', 'Shipped', 'Out for Delivery']).stream()
         
         sync_results = []
         
