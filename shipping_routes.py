@@ -6,6 +6,48 @@ from config import db, limiter, app
 
 shipping_bp = Blueprint('shipping', __name__)
 
+def get_dtdc_tracking_data_internal(awb_number):
+    username = os.getenv('DTDC_USERNAME')
+    password = os.getenv('DTDC_PASSWORD')
+    
+    if not username or not password:
+        raise Exception("DTDC API Credentials not configured in env")
+        
+    # 1. Authenticate to get token
+    auth_url = f"https://blktracksvc.dtdc.com/dtdc-api/api/dtdc/authenticate?username={username}&password={password}"
+    auth_resp = requests.get(auth_url, timeout=10)
+    if auth_resp.status_code != 200:
+        raise Exception(f"DTDC Authentication failed with status code {auth_resp.status_code}")
+        
+    token = auth_resp.text.strip()
+    if token.startswith('{') or token.startswith('['):
+        try:
+            auth_data = auth_resp.json()
+            token = auth_data.get('token') or auth_data.get('accessToken') or token
+        except Exception:
+            pass
+            
+    if not token:
+        raise Exception("Failed to retrieve authentication token from DTDC")
+        
+    # 2. Query Tracking Details
+    tracking_url = "https://blktracksvc.dtdc.com/dtdc-api/rest/JSONCnTrk/getTrackDetails"
+    headers = {
+        "Content-Type": "application/json",
+        "X-Access-Token": token
+    }
+    payload = {
+        "trkType": "cnno",
+        "strcnno": str(awb_number),
+        "addtnlDtl": "Y"
+    }
+    
+    response = requests.post(tracking_url, json=payload, headers=headers, timeout=10)
+    if response.status_code != 200:
+        raise Exception(f"DTDC tracking request failed with status code {response.status_code}")
+        
+    return response.json()
+
 def book_consignment_internal(order_id, order_data):
     """
     Helper function to book a shipping consignment on Shipsy/DTDC and save the AWB to Firestore.
@@ -92,7 +134,7 @@ def book_consignment_internal(order_id, order_data):
 @limiter.limit("20 per minute")
 def track_order():
     """
-    Handles order tracking using the unified Shipsy API.
+    Handles order tracking using the official DTDC REST Tracking API.
     """
     try:
         data = request.get_json()
@@ -101,63 +143,43 @@ def track_order():
         if not awb_number:
             return jsonify({"error": "AWB number is required"}), 400
 
-        shipsy_api_key = os.getenv('SHIPSY_API_KEY')
-        if not shipsy_api_key:
-            return jsonify({"error": "Shipsy API Key not configured"}), 500
-
-        # Query Shipsy Tracking API directly using the API key
-        base_url = os.getenv('SHIPSY_API_URL', "https://dtdcapi.shipsy.io/api/customer/integration/consignment/softdata")
-        api_base = base_url.split('/api/')[0]
-        tracking_url = f"{api_base}/api/customer/integration/consignment/track"
+        res_data = get_dtdc_tracking_data_internal(awb_number)
         
-        headers = {
-            'api-key': shipsy_api_key,
-            'Content-Type': 'application/json'
-        }
-        params = {
-            'reference_number': awb_number
-        }
-        
-        response = requests.get(tracking_url, params=params, headers=headers)
-        
-        if response.status_code in [400, 404]:
-            return jsonify({
-                "error": "Tracking information is not yet available for this AWB."
-            }), 404
+        if not res_data.get('statusFlag') or res_data.get('status') == 'FAILED' or not res_data.get('trackHeader'):
+            errors = res_data.get('errorDetails') or []
+            error_msg = "Tracking information is not yet available for this AWB."
+            for err in errors:
+                if err.get('name') == 'strError':
+                    error_msg = err.get('value') or error_msg
+            return jsonify({"error": error_msg}), 404
             
-        if response.status_code != 200:
-            return jsonify({"error": f"Failed to get tracking: {response.text}"}), response.status_code
-
-        res_data = response.json()
-        if res_data.get('status') != 'OK' or not res_data.get('data'):
-            return jsonify({"error": "No tracking data found for this AWB."}), 404
-            
-        consignment = res_data['data'][0]
-        current_status = consignment.get('status', 'In Transit')
-        current_location = consignment.get('current_hub', 'Processing Hub')
-        delivery_date = consignment.get('expected_delivery_date', '4-5 Days')
-        history = consignment.get('tracking_history', [])
+        track_header = res_data['trackHeader']
+        current_status = track_header.get('strStatus', 'In Transit')
+        current_location = track_header.get('strDestination') or track_header.get('strOrigin') or 'Processing Hub'
+        
+        track_details = res_data.get('trackDetails') or []
+        history = [
+            {
+                "status": item.get('strAction', 'Transit Update'),
+                "location": item.get('strOrigin', 'Hub'),
+                "time": f"{item.get('strActionDate', '')} {item.get('strActionTime', '')}".strip() or 'Recently',
+                "remarks": item.get('sTrRemarks', '')
+            } for item in track_details
+        ]
 
         return jsonify({
             "status": current_status,
             "location": current_location,
-            "eta": delivery_date,
-            "awb": consignment.get('reference_number', awb_number),
-            "origin": consignment.get('origin', ''),
-            "destination": consignment.get('destination', ''),
-            "history": [
-                {
-                    "status": h.get('status'),
-                    "location": h.get('location'),
-                    "time": h.get('activity_date'),
-                    "remarks": h.get('remarks', '')
-                } for h in history
-            ]
+            "eta": "4-5 Days",
+            "awb": track_header.get('strShipmentNo', awb_number),
+            "origin": track_header.get('strOrigin', ''),
+            "destination": track_header.get('strDestination', ''),
+            "history": history
         }), 200
 
     except Exception as e:
         app.logger.error(f"Tracking Error: {str(e)}")
-        return jsonify({"error": "External Tracking Service currently unavailable"}), 500
+        return jsonify({"error": str(e)}), 500
 
 @shipping_bp.route('/create-consignment', methods=['POST'])
 @limiter.limit("10 per minute")
@@ -336,25 +358,12 @@ def sync_order_statuses():
 
             # 2. Get Live Tracking from DTDC
             try:
-                shipsy_api_key = os.getenv('SHIPSY_API_KEY')
-                base_url = os.getenv('SHIPSY_API_URL', "https://dtdcapi.shipsy.io/api/customer/integration/consignment/softdata")
-                api_base = base_url.split('/api/')[0]
-                tracking_url = f"{api_base}/api/customer/integration/consignment/track"
-                
-                params = {'reference_number': awb}
-                headers = {'api-key': shipsy_api_key}
-                
-                response = requests.get(tracking_url, params=params, headers=headers)
-                
-                if response.status_code != 200:
-                    continue
-
-                res_data = response.json()
-                if res_data.get('status') != 'OK' or not res_data.get('data'):
+                res_data = get_dtdc_tracking_data_internal(awb)
+                if not res_data.get('statusFlag') or not res_data.get('trackHeader'):
                     continue
                     
-                consignment = res_data['data'][0]
-                live_status = consignment.get('status', '').upper()
+                track_header = res_data['trackHeader']
+                live_status = track_header.get('strStatus', '').upper()
                 
                 # 3. Map DTDC status to internal status
                 new_status = None
