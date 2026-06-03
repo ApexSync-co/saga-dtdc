@@ -259,7 +259,7 @@ def generate_label():
     """
     try:
         awb = request.args.get('awb')
-        label_code = request.args.get('label_code', 'SHIP_LABEL_4X6')
+        label_code = request.args.get('label_code', 'SHIP_LABEL_A4')
         label_format = request.args.get('label_format', 'pdf')
         
         if not awb:
