@@ -117,6 +117,8 @@ def book_consignment_internal(order_id, order_data):
             if db:
                 db.collection('orders').document(order_id).update({
                     'awbNumber': awb,
+                    'trackingId': awb,
+                    'courier': 'DTDC',
                     'status': 'Ready to Ship',
                     'updatedAt': firestore.SERVER_TIMESTAMP
                 })
